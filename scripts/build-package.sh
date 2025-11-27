@@ -17,7 +17,7 @@ fi
 # Check for required tools
 if ! command -v dpkg-buildpackage &> /dev/null; then
     echo "Error: dpkg-buildpackage not found"
-    echo "Install it with: sudo apt-get install devscripts debhelper"
+    echo "Install it with: sudo apt-get install build-essential devscripts debhelper"
     exit 1
 fi
 

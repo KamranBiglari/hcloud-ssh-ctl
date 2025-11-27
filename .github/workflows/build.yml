@@ -19,10 +19,11 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y devscripts debhelper dialog jq curl pssh
+        sudo apt-get install -y build-essential devscripts debhelper dialog jq curl pssh
 
     - name: Build Debian package
       run: |
+        chmod +x debian/rules debian/postinst
         dpkg-buildpackage -us -uc -b
         mv ../*.deb .
         mv ../*.buildinfo . 2>/dev/null || true

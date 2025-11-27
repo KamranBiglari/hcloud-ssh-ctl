@@ -47,7 +47,7 @@ sudo make install
 
 ```bash
 # Install build dependencies
-sudo apt-get install debhelper devscripts
+sudo apt-get install build-essential debhelper devscripts
 
 # Build the package
 make build-deb
