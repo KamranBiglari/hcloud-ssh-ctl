@@ -1,0 +1,896 @@
+#!/bin/bash
+#
+# hcloud-ssh-ctl - Hetzner Cloud SSH Management TUI
+# A terminal-based user interface for executing SSH commands on Hetzner Cloud servers
+#
+
+# Don't use set -e as it causes premature exits with dialog
+# set -e
+
+VERSION="1.0.0"
+CONFIG_DIR="${HOME}/.config/hcloud-ssh-ctl"
+CONFIG_FILE="${CONFIG_DIR}/config"
+KEYS_DIR="${CONFIG_DIR}/keys"
+TEMP_DIR="/tmp/hcloud-ssh-ctl-$$"
+DEBUG_MODE="${DEBUG_MODE:-0}"
+
+# Dependencies check
+check_dependencies() {
+    local missing_deps=()
+
+    for cmd in dialog jq curl parallel-ssh; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        echo "Error: Missing required dependencies: ${missing_deps[*]}"
+        echo "Please install them first:"
+        echo "  sudo apt-get install dialog jq curl pssh"
+        exit 1
+    fi
+}
+
+# Initialize configuration directory
+init_config() {
+    mkdir -p "$CONFIG_DIR" "$KEYS_DIR"
+    chmod 700 "$CONFIG_DIR" "$KEYS_DIR"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "{}" > "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+    fi
+}
+
+# Cleanup on exit
+cleanup() {
+    if [ "$DEBUG_MODE" = "1" ]; then
+        echo "Debug mode: Temp files preserved at: $TEMP_DIR" >&2
+    else
+        rm -rf "$TEMP_DIR"
+    fi
+}
+trap cleanup EXIT
+
+# Create working directory
+mkdir -p "$TEMP_DIR"
+
+# Handle errors gracefully
+handle_error() {
+    echo "Error on line $1" >&2
+    echo "Temp files preserved at: $TEMP_DIR" >&2
+    exit 1
+}
+trap 'handle_error $LINENO' ERR
+
+#
+# Configuration Management
+#
+
+# Get all project names
+get_projects() {
+    jq -r 'keys[]' "$CONFIG_FILE" 2>/dev/null || echo ""
+}
+
+# Get project API key
+get_project_key() {
+    local project="$1"
+    jq -r ".\"$project\".api_key // empty" "$CONFIG_FILE" 2>/dev/null
+}
+
+# Add or update project
+add_project() {
+    local project="$1"
+    local api_key="$2"
+
+    local tmp_file=$(mktemp)
+    jq ".\"$project\" = {\"api_key\": \"$api_key\"}" "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+}
+
+# Delete project
+delete_project() {
+    local project="$1"
+    local tmp_file=$(mktemp)
+    jq "del(.\"$project\")" "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+}
+
+#
+# Hetzner Cloud API
+#
+
+# List servers for a project
+list_servers() {
+    local api_key="$1"
+    local filter="$2"
+
+    local response=$(curl -s -H "Authorization: Bearer $api_key" \
+        "https://api.hetzner.cloud/v1/servers")
+
+    if [ -z "$filter" ]; then
+        echo "$response" | jq -r '.servers[] | "\(.id)|\(.name)|\(.public_net.ipv4.ip)|\(.status)"'
+    else
+        echo "$response" | jq -r ".servers[] | select(.name | contains(\"$filter\")) | \"\(.id)|\(.name)|\(.public_net.ipv4.ip)|\(.status)\""
+    fi
+}
+
+#
+# SSH Key Management
+#
+
+# List saved private keys
+list_private_keys() {
+    if [ -d "$KEYS_DIR" ]; then
+        find "$KEYS_DIR" -type f -name "*.key" -exec basename {} .key \; | sort
+    fi
+}
+
+# Get private key path
+get_private_key_path() {
+    local key_name="$1"
+    echo "${KEYS_DIR}/${key_name}.key"
+}
+
+# Save private key
+save_private_key() {
+    local key_name="$1"
+    local key_content="$2"
+    local key_path=$(get_private_key_path "$key_name")
+
+    echo "$key_content" > "$key_path"
+    chmod 600 "$key_path"
+}
+
+# Delete private key
+delete_private_key() {
+    local key_name="$1"
+    local key_path=$(get_private_key_path "$key_name")
+    rm -f "$key_path"
+}
+
+#
+# SSH Execution
+#
+
+# Execute SSH command on multiple servers
+execute_ssh_command() {
+    local servers_file="$1"
+    local private_key="$2"
+    local ssh_command="$3"
+    local username="${4:-root}"
+    local port="${5:-22}"
+
+    local key_path=$(get_private_key_path "$private_key")
+    local hosts_file="${TEMP_DIR}/hosts"
+    local output_dir="${TEMP_DIR}/output"
+    local error_dir="${TEMP_DIR}/errors"
+    local log_file="${TEMP_DIR}/execution.log"
+
+    mkdir -p "$output_dir" "$error_dir"
+
+    # Create hosts file with IPs
+    cp "$servers_file" "$hosts_file"
+
+    # Log execution details
+    {
+        echo "=== SSH Execution Log ==="
+        echo "Timestamp: $(date)"
+        echo "Username: $username"
+        echo "Port: $port"
+        echo "Key: $key_path"
+        echo "Command: $ssh_command"
+        echo "Command (quoted): '$ssh_command'"
+        echo "Servers:"
+        cat "$hosts_file"
+        echo ""
+        echo "=== Execution Output ==="
+    } > "$log_file"
+
+    # Try using direct SSH instead of parallel-ssh for better reliability
+    echo "Using direct SSH execution for better compatibility..." >> "$log_file"
+
+    while IFS= read -r host; do
+        # Clean host address
+        host=$(echo "$host" | tr -d '\r\n' | xargs)
+        [ -z "$host" ] && continue
+
+        echo "" >> "$log_file"
+        echo "Executing on $host..." >> "$log_file"
+
+        # Execute with SSH directly
+        ssh -v \
+            -i "$key_path" \
+            -p "$port" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=5 \
+            -o ServerAliveCountMax=2 \
+            -l "$username" \
+            "$host" \
+            "$ssh_command" \
+            > "${output_dir}/${host}" \
+            2> "${error_dir}/${host}"
+
+        local ssh_exit=$?
+        echo "SSH exit code for $host: $ssh_exit" >> "$log_file"
+
+        # Log what we got
+        if [ -s "${output_dir}/${host}" ]; then
+            echo "Got output ($(wc -l < "${output_dir}/${host}") lines)" >> "$log_file"
+        else
+            echo "No output received" >> "$log_file"
+        fi
+
+    done < "$hosts_file"
+
+    # Log created files for debugging
+    {
+        echo ""
+        echo "=== Created Files ==="
+        echo "Output directory: $output_dir"
+        ls -la "$output_dir" 2>&1 || echo "No output files created"
+        echo ""
+        echo "Error directory: $error_dir"
+        ls -la "$error_dir" 2>&1 || echo "No error files created"
+    } >> "$log_file"
+
+    # Return output directory for processing
+    echo "$output_dir"
+}
+
+#
+# TUI Dialogs
+#
+
+# Main menu
+show_main_menu() {
+    dialog --clear --title "Hetzner Cloud SSH Control" \
+        --menu "Choose an option:" 17 60 7 \
+        1 "Manage Projects" \
+        2 "Manage SSH Keys" \
+        3 "Execute SSH Commands" \
+        4 "Test SSH Connection" \
+        5 "About" \
+        6 "Exit" \
+        2>&1 >/dev/tty
+}
+
+# Project management menu
+show_project_menu() {
+    dialog --clear --title "Project Management" \
+        --menu "Choose an option:" 15 60 5 \
+        1 "Add/Update Project" \
+        2 "Delete Project" \
+        3 "List Projects" \
+        4 "Back to Main Menu" \
+        2>&1 >/dev/tty
+}
+
+# Add/Update project dialog
+add_project_dialog() {
+    local project_name=$(dialog --stdout --title "Add Project" \
+        --inputbox "Enter project name:" 8 60)
+
+    [ -z "$project_name" ] && return
+
+    local api_key=$(dialog --stdout --title "Add Project" \
+        --insecure --passwordbox "Enter Hetzner Cloud API Key:" 8 60)
+
+    [ -z "$api_key" ] && return
+
+    add_project "$project_name" "$api_key"
+    dialog --msgbox "Project '$project_name' saved successfully!" 6 50
+}
+
+# List projects dialog
+list_projects_dialog() {
+    local projects=$(get_projects)
+
+    if [ -z "$projects" ]; then
+        dialog --msgbox "No projects configured." 6 40
+        return
+    fi
+
+    local message="Configured projects:\n\n"
+    while IFS= read -r project; do
+        message+="  • $project\n"
+    done <<< "$projects"
+
+    dialog --msgbox "$message" 15 60
+}
+
+# Delete project dialog
+delete_project_dialog() {
+    local projects=$(get_projects)
+
+    if [ -z "$projects" ]; then
+        dialog --msgbox "No projects to delete." 6 40
+        return
+    fi
+
+    local menu_items=()
+    local counter=1
+    while IFS= read -r project; do
+        menu_items+=("$counter" "$project")
+        ((counter++))
+    done <<< "$projects"
+
+    local choice=$(dialog --stdout --title "Delete Project" \
+        --menu "Select project to delete:" 15 60 8 \
+        "${menu_items[@]}")
+
+    [ -z "$choice" ] && return
+
+    local project=$(echo "$projects" | sed -n "${choice}p")
+
+    dialog --yesno "Are you sure you want to delete project '$project'?" 7 60
+    if [ $? -eq 0 ]; then
+        delete_project "$project"
+        dialog --msgbox "Project '$project' deleted." 6 40
+    fi
+}
+
+# SSH Key management menu
+show_key_menu() {
+    dialog --clear --title "SSH Key Management" \
+        --menu "Choose an option:" 17 65 6 \
+        1 "Add SSH Private Key (Paste)" \
+        2 "Import SSH Key from File" \
+        3 "List SSH Keys" \
+        4 "Delete SSH Key" \
+        5 "Back to Main Menu" \
+        2>&1 >/dev/tty
+}
+
+# Add SSH key dialog
+add_ssh_key_dialog() {
+    local key_name=$(dialog --stdout --title "Add SSH Key" \
+        --inputbox "Enter a name for this SSH key:" 8 60)
+
+    # Check if user cancelled (empty input)
+    if [ $? -ne 0 ] || [ -z "$key_name" ]; then
+        return
+    fi
+
+    # Create a template file with instructions
+    local key_template="${TEMP_DIR}/key_template"
+    local key_file="${TEMP_DIR}/key_input"
+
+    cat > "$key_template" <<'EOF'
+# Paste your SSH private key below this line
+# Delete these instruction lines and paste your key
+# Save and exit: Press Ctrl+X (or your editor's save command)
+#
+# Example format:
+# -----BEGIN OPENSSH PRIVATE KEY-----
+# b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn
+# ... (rest of your key) ...
+# -----END OPENSSH PRIVATE KEY-----
+
+EOF
+
+    # Use dialog editbox with template
+    dialog --title "Add SSH Key - Paste your private key" \
+        --editbox "$key_template" 25 78 2>"$key_file"
+
+    # Check if dialog was cancelled
+    if [ $? -ne 0 ]; then
+        rm -f "$key_template" "$key_file"
+        return
+    fi
+
+    # Remove comment lines and check if there's content
+    local cleaned_key=$(grep -v '^#' "$key_file" | grep -v '^$' | head -c 10)
+
+    if [ -n "$cleaned_key" ]; then
+        # Remove instruction lines before saving
+        grep -v '^#' "$key_file" > "${key_file}.clean"
+        save_private_key "$key_name" "$(cat "${key_file}.clean")"
+        dialog --msgbox "SSH key '$key_name' saved successfully!" 6 50
+        rm -f "${key_file}.clean"
+    else
+        dialog --msgbox "No key content provided. Key not saved." 7 50
+    fi
+
+    rm -f "$key_template" "$key_file"
+}
+
+# Import SSH key from file dialog
+import_ssh_key_dialog() {
+    local key_name=$(dialog --stdout --title "Import SSH Key" \
+        --inputbox "Enter a name for this SSH key:" 8 60)
+
+    # Check if user cancelled
+    if [ $? -ne 0 ] || [ -z "$key_name" ]; then
+        return
+    fi
+
+    local key_path=$(dialog --stdout --title "Import SSH Key" \
+        --inputbox "Enter the full path to your SSH private key file:" 8 70)
+
+    # Check if user cancelled
+    if [ $? -ne 0 ] || [ -z "$key_path" ]; then
+        return
+    fi
+
+    # Expand tilde to home directory
+    key_path="${key_path/#\~/$HOME}"
+
+    # Check if file exists
+    if [ ! -f "$key_path" ]; then
+        dialog --msgbox "Error: File not found: $key_path" 7 60
+        return
+    fi
+
+    # Check if file is readable
+    if [ ! -r "$key_path" ]; then
+        dialog --msgbox "Error: File not readable: $key_path" 7 60
+        return
+    fi
+
+    # Import the key
+    save_private_key "$key_name" "$(cat "$key_path")"
+    dialog --msgbox "SSH key '$key_name' imported successfully from:\n$key_path" 8 70
+}
+
+# List SSH keys dialog
+list_ssh_keys_dialog() {
+    local keys=$(list_private_keys)
+
+    if [ -z "$keys" ]; then
+        dialog --msgbox "No SSH keys configured." 6 40
+        return
+    fi
+
+    local message="Configured SSH keys:\n\n"
+    while IFS= read -r key; do
+        message+="  • $key\n"
+    done <<< "$keys"
+
+    dialog --msgbox "$message" 15 60
+}
+
+# Delete SSH key dialog
+delete_ssh_key_dialog() {
+    local keys=$(list_private_keys)
+
+    if [ -z "$keys" ]; then
+        dialog --msgbox "No SSH keys to delete." 6 40
+        return
+    fi
+
+    local menu_items=()
+    local counter=1
+    while IFS= read -r key; do
+        menu_items+=("$counter" "$key")
+        ((counter++))
+    done <<< "$keys"
+
+    local choice=$(dialog --stdout --title "Delete SSH Key" \
+        --menu "Select SSH key to delete:" 15 60 8 \
+        "${menu_items[@]}")
+
+    [ -z "$choice" ] && return
+
+    local key=$(echo "$keys" | sed -n "${choice}p")
+
+    dialog --yesno "Are you sure you want to delete SSH key '$key'?" 7 60
+    if [ $? -eq 0 ]; then
+        delete_private_key "$key"
+        dialog --msgbox "SSH key '$key' deleted." 6 40
+    fi
+}
+
+# Select project dialog
+select_project_dialog() {
+    local projects=$(get_projects)
+
+    if [ -z "$projects" ]; then
+        dialog --msgbox "No projects configured. Please add a project first." 6 60
+        return 1
+    fi
+
+    local menu_items=()
+    local counter=1
+    while IFS= read -r project; do
+        menu_items+=("$counter" "$project")
+        ((counter++))
+    done <<< "$projects"
+
+    local choice=$(dialog --stdout --title "Select Project" \
+        --menu "Select a project:" 15 60 8 \
+        "${menu_items[@]}")
+
+    [ -z "$choice" ] && return 1
+
+    echo "$projects" | sed -n "${choice}p"
+}
+
+# Server selection dialog
+select_servers_dialog() {
+    local project="$1"
+    local api_key=$(get_project_key "$project")
+
+    # Ask for filter
+    local filter=$(dialog --stdout --title "Filter Servers" \
+        --inputbox "Enter name filter (leave empty for all):" 8 60)
+
+    # Get servers
+    local servers=$(list_servers "$api_key" "$filter")
+
+    if [ -z "$servers" ]; then
+        dialog --msgbox "No servers found." 6 40
+        return 1
+    fi
+
+    # Build checklist
+    local menu_items=()
+    while IFS='|' read -r id name ip status; do
+        menu_items+=("$ip" "$name ($ip) - $status" "off")
+    done <<< "$servers"
+
+    local selected=$(dialog --stdout --title "Select Servers" \
+        --checklist "Select servers to execute command on:" 20 70 12 \
+        "${menu_items[@]}")
+
+    [ -z "$selected" ] && return 1
+
+    # Remove quotes and save IPs
+    echo "$selected" | tr -d '"' | tr ' ' '\n'
+}
+
+# Select SSH key dialog
+select_ssh_key_dialog() {
+    local keys=$(list_private_keys)
+
+    if [ -z "$keys" ]; then
+        dialog --msgbox "No SSH keys configured. Please add an SSH key first." 6 60
+        return 1
+    fi
+
+    local menu_items=()
+    local counter=1
+    while IFS= read -r key; do
+        menu_items+=("$counter" "$key")
+        ((counter++))
+    done <<< "$keys"
+
+    local choice=$(dialog --stdout --title "Select SSH Key" \
+        --menu "Select SSH key:" 15 60 8 \
+        "${menu_items[@]}")
+
+    [ -z "$choice" ] && return 1
+
+    echo "$keys" | sed -n "${choice}p"
+}
+
+# Test SSH connection
+test_ssh_connection() {
+    # Select project
+    local project=$(select_project_dialog)
+    [ $? -ne 0 ] && return
+
+    # Select servers
+    local servers_file="${TEMP_DIR}/selected_servers"
+    select_servers_dialog "$project" > "$servers_file"
+    [ $? -ne 0 ] && return
+
+    if [ ! -s "$servers_file" ]; then
+        dialog --msgbox "No servers selected." 6 40
+        return
+    fi
+
+    # Select SSH key
+    local ssh_key=$(select_ssh_key_dialog)
+    [ $? -ne 0 ] && return
+
+    # Enter SSH username
+    local username=$(dialog --stdout --title "SSH Username" \
+        --inputbox "Enter SSH username:" 8 40 "root")
+    [ -z "$username" ] && username="root"
+
+    # Enter SSH port
+    local port=$(dialog --stdout --title "SSH Port" \
+        --inputbox "Enter SSH port:" 8 40 "22")
+
+    # Validate port
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ -z "$port" ]; then
+        port="22"
+    fi
+
+    # Test connection
+    local server_count=$(wc -l < "$servers_file")
+    dialog --infobox "Testing connection to $server_count server(s)...\nThis may take 10-30 seconds..." 6 55
+    sleep 1
+
+    # Test with a simple command
+    local output_dir=$(execute_ssh_command "$servers_file" "$ssh_key" "echo 'Connection successful'; hostname" "$username" "$port")
+
+    # Show test results
+    local test_results="${TEMP_DIR}/test_results.txt"
+    local error_dir="${TEMP_DIR}/errors"
+    local log_file="${TEMP_DIR}/execution.log"
+
+    echo "=== SSH Connection Test Results ===" > "$test_results"
+    echo "" >> "$test_results"
+    echo "Username: $username" >> "$test_results"
+    echo "Port: $port" >> "$test_results"
+    echo "Tested: $(date)" >> "$test_results"
+    echo "" >> "$test_results"
+    echo "Log: $log_file" >> "$test_results"
+    echo "" >> "$test_results"
+    echo "========================================" >> "$test_results"
+    echo "" >> "$test_results"
+
+    local success_count=0
+    local fail_count=0
+
+    while IFS= read -r ip; do
+        # Remove any trailing whitespace from IP
+        ip=$(echo "$ip" | tr -d '\r\n' | xargs)
+
+        echo "Server: $ip" >> "$test_results"
+        echo "Debug: Checking ${output_dir}/${ip}" >> "$test_results"
+
+        # Check if output file exists and has content (command succeeded)
+        if [ -f "${output_dir}/${ip}" ] && [ -s "${output_dir}/${ip}" ]; then
+            # Check if the output contains our success message
+            if grep -q "Connection successful" "${output_dir}/${ip}" 2>/dev/null; then
+                echo "✓ SUCCESS - Connection working!" >> "$test_results"
+                echo "Response:" >> "$test_results"
+                cat "${output_dir}/${ip}" >> "$test_results"
+                success_count=$((success_count + 1))
+
+                # Show SSH debug info if present (this is normal verbose output)
+                if [ -f "${error_dir}/${ip}" ] && [ -s "${error_dir}/${ip}" ]; then
+                    echo "" >> "$test_results"
+                    echo "SSH Debug Info (from stderr - this is normal):" >> "$test_results"
+                    cat "${error_dir}/${ip}" | tail -5 >> "$test_results"
+                fi
+            else
+                # Has output but not our success message - partial success
+                echo "⚠ PARTIAL - Command executed but check output" >> "$test_results"
+                echo "Output:" >> "$test_results"
+                cat "${output_dir}/${ip}" >> "$test_results"
+                success_count=$((success_count + 1))
+            fi
+        else
+            # No output file or empty - connection failed
+            echo "✗ FAILED - Cannot connect" >> "$test_results"
+            fail_count=$((fail_count + 1))
+
+            if [ -f "${error_dir}/${ip}" ] && [ -s "${error_dir}/${ip}" ]; then
+                # Check if error contains actual SSH connection errors
+                if grep -qE "(Connection refused|Connection timed out|Permission denied|No route)" "${error_dir}/${ip}" 2>/dev/null; then
+                    echo "Error details:" >> "$test_results"
+                    cat "${error_dir}/${ip}" >> "$test_results"
+                else
+                    # Has stderr but might just be verbose output with no stdout
+                    echo "No command output received, but SSH connected (check stderr):" >> "$test_results"
+                    cat "${error_dir}/${ip}" | tail -10 >> "$test_results"
+                fi
+            else
+                echo "No output or error details (connection timeout or killed)" >> "$test_results"
+                echo "" >> "$test_results"
+                echo "Possible causes:" >> "$test_results"
+                echo "  - Wrong port (trying $port)" >> "$test_results"
+                echo "  - SSH key not authorized" >> "$test_results"
+                echo "  - Wrong username (trying $username)" >> "$test_results"
+                echo "  - Firewall blocking connection" >> "$test_results"
+                echo "  - Server not running SSH service" >> "$test_results"
+            fi
+        fi
+        echo "" >> "$test_results"
+        echo "----------------------------------------" >> "$test_results"
+        echo "" >> "$test_results"
+    done < "$servers_file"
+
+    echo "" >> "$test_results"
+    echo "Summary: $success_count succeeded, $fail_count failed" >> "$test_results"
+    echo "" >> "$test_results"
+    echo "View the debug log for detailed information." >> "$test_results"
+
+    # Show results with option to view logs
+    while true; do
+        dialog --title "Connection Test Results ($success_count OK, $fail_count Failed)" \
+            --extra-button \
+            --extra-label "View Debug Log" \
+            --ok-label "Close" \
+            --textbox "$test_results" 40 100
+
+        local result=$?
+        if [ $result -eq 0 ] || [ $result -eq 1 ]; then
+            # OK or Cancel - exit
+            break
+        elif [ $result -eq 3 ]; then
+            # Extra button - show debug log
+            dialog --title "Debug Log (Verbose SSH Output)" \
+                --ok-label "Back" \
+                --textbox "$log_file" 40 100
+        else
+            break
+        fi
+    done
+}
+
+# Execute SSH command workflow
+execute_ssh_workflow() {
+    # Select project
+    local project=$(select_project_dialog)
+    [ $? -ne 0 ] && return
+
+    # Select servers
+    local servers_file="${TEMP_DIR}/selected_servers"
+    select_servers_dialog "$project" > "$servers_file"
+    [ $? -ne 0 ] && return
+
+    if [ ! -s "$servers_file" ]; then
+        dialog --msgbox "No servers selected." 6 40
+        return
+    fi
+
+    # Select SSH key
+    local ssh_key=$(select_ssh_key_dialog)
+    [ $? -ne 0 ] && return
+
+    # Enter SSH username
+    local username=$(dialog --stdout --title "SSH Username" \
+        --inputbox "Enter SSH username:" 8 40 "root")
+    [ -z "$username" ] && username="root"
+
+    # Enter SSH port
+    local port=$(dialog --stdout --title "SSH Port" \
+        --inputbox "Enter SSH port:" 8 40 "22")
+
+    # Validate port is a number
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ -z "$port" ]; then
+        port="22"
+    fi
+
+    # Enter command
+    local command=$(dialog --stdout --title "SSH Command" \
+        --inputbox "Enter command to execute:" 8 60)
+
+    [ -z "$command" ] && return
+
+    # Confirm execution
+    local server_count=$(wc -l < "$servers_file")
+    dialog --yesno "Execute command on $server_count server(s)?\n\nCommand: $command\nPort: $port" 9 60
+    [ $? -ne 0 ] && return
+
+    # Execute
+    dialog --infobox "Executing command on $server_count server(s)..." 5 50
+
+    local output_dir=$(execute_ssh_command "$servers_file" "$ssh_key" "$command" "$username" "$port")
+
+    # Show results
+    local results_file="${TEMP_DIR}/results.txt"
+    local error_dir="${TEMP_DIR}/errors"
+    local log_file="${TEMP_DIR}/execution.log"
+
+    echo "Command: $command" > "$results_file"
+    echo "Username: $username" >> "$results_file"
+    echo "Port: $port" >> "$results_file"
+    echo "Executed on: $(date)" >> "$results_file"
+    echo "" >> "$results_file"
+    echo "Log file: $log_file" >> "$results_file"
+    echo "" >> "$results_file"
+    echo "========================================" >> "$results_file"
+    echo "" >> "$results_file"
+
+    while IFS= read -r ip; do
+        echo "Server: $ip" >> "$results_file"
+        echo "----------------------------------------" >> "$results_file"
+
+        # Check for stdout
+        if [ -f "${output_dir}/${ip}" ] && [ -s "${output_dir}/${ip}" ]; then
+            echo "OUTPUT:" >> "$results_file"
+            cat "${output_dir}/${ip}" >> "$results_file"
+        else
+            echo "OUTPUT: (empty or no output)" >> "$results_file"
+        fi
+
+        echo "" >> "$results_file"
+
+        # Check for stderr/errors
+        if [ -f "${error_dir}/${ip}" ] && [ -s "${error_dir}/${ip}" ]; then
+            echo "ERRORS:" >> "$results_file"
+            cat "${error_dir}/${ip}" >> "$results_file"
+        fi
+
+        # If both are empty, it's a connection failure
+        if [ ! -s "${output_dir}/${ip}" ] && [ ! -s "${error_dir}/${ip}" ]; then
+            echo "STATUS: Connection failed or timed out" >> "$results_file"
+            echo "Check the log file for details: $log_file" >> "$results_file"
+        fi
+
+        echo "" >> "$results_file"
+        echo "" >> "$results_file"
+    done < "$servers_file"
+
+    # Show results with option to view logs
+    while true; do
+        dialog --title "Execution Results" \
+            --extra-button \
+            --extra-label "View Debug Log" \
+            --ok-label "Close" \
+            --textbox "$results_file" 40 100
+
+        local result=$?
+        if [ $result -eq 0 ] || [ $result -eq 1 ]; then
+            # OK or Cancel - exit
+            break
+        elif [ $result -eq 3 ]; then
+            # Extra button - show debug log
+            dialog --title "Debug Log (Verbose SSH Output)" \
+                --ok-label "Back" \
+                --textbox "$log_file" 40 100
+        else
+            break
+        fi
+    done
+}
+
+# About dialog
+show_about() {
+    dialog --title "About" \
+        --msgbox "Hetzner Cloud SSH Control v${VERSION}\n\nA TUI for managing and executing SSH commands on Hetzner Cloud servers.\n\nAuthor: Kamran Biglari\nLicense: MIT" 12 60
+}
+
+#
+# Main Program
+#
+
+main() {
+    check_dependencies
+    init_config
+
+    while true; do
+        choice=$(show_main_menu)
+
+        case $choice in
+            1)
+                while true; do
+                    proj_choice=$(show_project_menu)
+                    case $proj_choice in
+                        1) add_project_dialog ;;
+                        2) delete_project_dialog ;;
+                        3) list_projects_dialog ;;
+                        4|"") break ;;
+                    esac
+                done
+                ;;
+            2)
+                while true; do
+                    key_choice=$(show_key_menu)
+                    case $key_choice in
+                        1) add_ssh_key_dialog ;;
+                        2) import_ssh_key_dialog ;;
+                        3) list_ssh_keys_dialog ;;
+                        4) delete_ssh_key_dialog ;;
+                        5|"") break ;;
+                    esac
+                done
+                ;;
+            3)
+                execute_ssh_workflow
+                ;;
+            4)
+                test_ssh_connection
+                ;;
+            5)
+                show_about
+                ;;
+            6|"")
+                clear
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main "$@"

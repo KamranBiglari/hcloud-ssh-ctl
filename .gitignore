@@ -1,0 +1,20 @@
+# Debian build artifacts
+debian/hcloud-ssh-ctl/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+*.deb
+*.changes
+*.buildinfo
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# Configuration (for testing)
+.config/
+
+# Build artifacts
+build/
+dist/

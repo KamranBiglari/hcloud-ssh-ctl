@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	install -D -m 0755 src/hcloud-ssh-ctl $(CURDIR)/debian/hcloud-ssh-ctl/usr/bin/hcloud-ssh-ctl
+	install -D -m 0644 docs/hcloud-ssh-ctl.1 $(CURDIR)/debian/hcloud-ssh-ctl/usr/share/man/man1/hcloud-ssh-ctl.1
+
+override_dh_auto_build:
+	# No build needed for bash script
+
+override_dh_auto_test:
+	# Add tests here if needed

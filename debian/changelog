@@ -1,0 +1,10 @@
+hcloud-ssh-ctl (1.0.0) stable; urgency=medium
+
+  * Initial release
+  * Multi-project support with API key management
+  * Server filtering and selection interface
+  * SSH private key management
+  * Parallel SSH command execution on multiple servers
+  * Dialog-based TUI for easy navigation
+
+ -- Kamran Biglari <your.email@example.com>  Wed, 27 Nov 2024 00:00:00 +0000

@@ -1,0 +1,23 @@
+Source: hcloud-ssh-ctl
+Section: admin
+Priority: optional
+Maintainer: Kamran Biglari <your.email@example.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Homepage: https://github.com/KamranBiglari/hcloud-ssh-ctl
+Vcs-Browser: https://github.com/KamranBiglari/hcloud-ssh-ctl
+Vcs-Git: https://github.com/KamranBiglari/hcloud-ssh-ctl.git
+
+Package: hcloud-ssh-ctl
+Architecture: all
+Depends: ${misc:Depends}, dialog, jq, curl, pssh
+Description: Hetzner Cloud SSH Management TUI
+ A terminal-based user interface for executing SSH commands
+ on Hetzner Cloud servers.
+ .
+ Features:
+  - Multi-project support with API key management
+  - Server filtering and selection
+  - SSH private key management
+  - Parallel SSH command execution
+  - Easy configuration similar to AWS CLI

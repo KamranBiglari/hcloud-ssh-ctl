@@ -1,0 +1,146 @@
+.TH HCLOUD-SSH-CTL 1 "November 2024" "hcloud-ssh-ctl 1.0.0" "User Commands"
+.SH NAME
+hcloud-ssh-ctl \- Hetzner Cloud SSH Management TUI
+.SH SYNOPSIS
+.B hcloud-ssh-ctl
+.SH DESCRIPTION
+.B hcloud-ssh-ctl
+is a terminal-based user interface (TUI) for managing and executing SSH commands on Hetzner Cloud servers.
+
+It provides an interactive interface for:
+.IP \(bu 2
+Managing multiple Hetzner Cloud projects with API keys
+.IP \(bu 2
+Listing and filtering servers
+.IP \(bu 2
+Managing SSH private keys
+.IP \(bu 2
+Executing commands on multiple servers in parallel
+.IP \(bu 2
+Viewing execution results
+
+.SH USAGE
+Simply run
+.B hcloud-ssh-ctl
+to start the interactive interface.
+
+.SS First-time Setup
+.TP
+.B 1. Add a Project
+From the main menu, select "Manage Projects", then "Add/Update Project". Enter your project name and Hetzner Cloud API key.
+.TP
+.B 2. Add SSH Keys
+From the main menu, select "Manage SSH Keys", then "Add SSH Private Key". Enter a name and paste your private key content.
+
+.SS Executing SSH Commands
+.TP
+.B 1.
+Select "Execute SSH Commands" from the main menu
+.TP
+.B 2.
+Choose a project
+.TP
+.B 3.
+Filter and select target servers
+.TP
+.B 4.
+Choose an SSH key
+.TP
+.B 5.
+Enter SSH username (default: root)
+.TP
+.B 6.
+Enter the command to execute
+.TP
+.B 7.
+View results for each server
+
+.SH FILES
+.TP
+.B ~/.config/hcloud-ssh-ctl/config
+Configuration file storing project names and API keys (JSON format)
+.TP
+.B ~/.config/hcloud-ssh-ctl/keys/
+Directory containing SSH private keys
+
+.SH CONFIGURATION
+Configuration files are stored in JSON format:
+
+.nf
+{
+  "project-name": {
+    "api_key": "your-hetzner-api-key"
+  }
+}
+.fi
+
+.SH DEPENDENCIES
+.TP
+.B dialog
+For the TUI interface
+.TP
+.B jq
+For JSON parsing
+.TP
+.B curl
+For API calls to Hetzner Cloud
+.TP
+.B pssh
+For parallel SSH execution
+
+.SH SECURITY
+.IP \(bu 2
+API keys are stored with file permissions 600
+.IP \(bu 2
+SSH private keys are stored with permissions 600
+.IP \(bu 2
+Configuration directory has permissions 700
+.IP \(bu 2
+SSH connections currently use StrictHostKeyChecking=no for convenience
+
+.SH EXAMPLES
+.TP
+.B Start the application
+.nf
+$ hcloud-ssh-ctl
+.fi
+
+.TP
+.B Install dependencies
+.nf
+$ sudo apt-get install dialog jq curl pssh
+.fi
+
+.SH ENVIRONMENT
+The tool uses the following directories:
+.TP
+.B $HOME/.config/hcloud-ssh-ctl
+Main configuration directory
+.TP
+.B /tmp/hcloud-ssh-ctl-$$
+Temporary working directory (cleaned up on exit)
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+General error (missing dependencies, invalid configuration, etc.)
+
+.SH BUGS
+Report bugs to: https://github.com/KamranBiglari/hcloud-ssh-ctl/issues
+
+.SH AUTHOR
+Written by Kamran Biglari.
+
+.SH COPYRIGHT
+Copyright \(co 2024 Kamran Biglari. License MIT.
+
+.SH SEE ALSO
+.BR ssh (1),
+.BR parallel-ssh (1),
+.BR dialog (1),
+.BR jq (1)
+
+Online documentation: https://github.com/KamranBiglari/hcloud-ssh-ctl
