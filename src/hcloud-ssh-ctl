@@ -846,6 +846,75 @@ show_about() {
 #
 
 main() {
+    # Handle command-line arguments
+    case "${1:-}" in
+        --help|-h|help)
+            cat <<EOF
+hcloud-ssh-ctl v${VERSION}
+Hetzner Cloud SSH Management TUI
+
+USAGE:
+    hcloud-ssh-ctl [OPTIONS]
+
+OPTIONS:
+    -h, --help       Show this help message
+    -v, --version    Show version information
+
+DESCRIPTION:
+    A terminal-based user interface for executing SSH commands on
+    Hetzner Cloud servers.
+
+FEATURES:
+    - Multi-project management with API keys
+    - SSH private key management
+    - Server filtering and selection
+    - Custom SSH port support
+    - Parallel SSH command execution
+    - Connection testing
+    - Verbose logging and debugging
+
+CONFIGURATION:
+    Configuration files are stored in: ~/.config/hcloud-ssh-ctl/
+    - config          Project configurations and API keys
+    - keys/           SSH private keys
+
+EXAMPLES:
+    # Start the interactive TUI
+    hcloud-ssh-ctl
+
+    # Run with debug mode (preserves logs)
+    DEBUG_MODE=1 hcloud-ssh-ctl
+
+    # Show this help
+    hcloud-ssh-ctl --help
+
+DOCUMENTATION:
+    man hcloud-ssh-ctl       View the manual page
+
+    Online: https://github.com/KamranBiglari/hcloud-ssh-ctl
+
+AUTHOR:
+    Kamran Biglari
+
+LICENSE:
+    MIT License
+EOF
+            exit 0
+            ;;
+        --version|-v|version)
+            echo "hcloud-ssh-ctl version ${VERSION}"
+            exit 0
+            ;;
+        "")
+            # No arguments - start TUI
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Try 'hcloud-ssh-ctl --help' for more information."
+            exit 1
+            ;;
+    esac
+
     check_dependencies
     init_config
 
